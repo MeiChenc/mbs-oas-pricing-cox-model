@@ -1,160 +1,163 @@
-# mbs_OLS.py
+# MBS Prepayment Pricing & Risk Engine
 
-`mbs_OLS.py` restores the Colab workflow into a runnable Python script for:
-- OLS `logit(SMM)` prepayment regression
-- Vasicek stochastic rate simulation
-- Path-dependent MBS cash-flow pricing
-- Baseline vs Improved model comparison
+## 1. Executive Summary
 
-## Framework
+This project develops a comprehensive **Logit-based Prepayment Model** and a path-dependent
+**Pricing & Risk Engine** for Agency Mortgage-Backed Securities (MBS).
 
-The script follows this structure:
+The primary objective is to quantify borrower **S-Curve prepayment behavior** and translate it into
+**tradable price, duration, and convexity risk** at the pool level.
 
-1. **Baseline**
-   - Model C: `logit_smm ~ spread + spread^2 + spread^3 + log_UPB + duration`
+The modeling framework adopts a reduced-form **Logit S-curve specification on monthly SMM**,
+augmented with cubic incentive terms to capture non-linear refinancing dynamics and borrower burnout.
+A maturity-aware valuation engine then simulates cash flows and measures **Negative Convexity**
+through effective duration analysis.
 
-2. **Improved model selection**
-   - Train Model A/B/C on train split
-   - Pick best model by out-of-sample test `RMSE(SMM)` (tie-break by `MAE(SMM)`)
+Using a 30-year TBA-eligible cohort, the model estimates an **Effective Duration of 4.06**, confirming
+significant **price compression in rate rallies** and validating the framework’s ability to connect
+borrower behavior with investor risk exposure.
 
-3. **Out-of-sample / valuation impact comparison**
-   - Compare Baseline vs Improved on:
-     - `P_base`
-     - `P(+50bp)`
-     - `P(-50bp)`
-     - `effective_duration`
+---
 
-## Data source
+## 2. Methodology
 
-Default input is:
-- `PrepayData.txt` (same dataset used in this project)
+### Step 1: Data Processing (ETL)
 
-## Models
+- **Aggregation:** Raw loan-level or pool-level records are aggregated to a monthly frequency.
+- **Target Variable:** Monthly **SMM (Single Monthly Mortality)** is constructed from cumulative
+  prepayment measures using end-of-period values to ensure internal consistency.
+- **Key Features:**
+  - **Incentive (Spread):**  
+    \[
+    \text{Spread} = \text{WAC} - \text{Market Rate}_{\text{matched maturity}}
+    \]
+  - **Seasoning:** Loan age (months).
+  - **Burnout / Size Proxy:** Logarithm of current UPB.
 
-- **Model A**: `logit_smm ~ spread`
-- **Model B**: `logit_smm ~ spread + duration`
-- **Model C**: `logit_smm ~ spread + I(spread**2) + I(spread**3) + log_UPB + duration`
+---
 
-## Time split
+### Step 2: Interest Rate Construction (Borrower-Facing)
 
-For target security type (default `30yr TBA Eligible`):
-- Train = first 80% by time
-- Test = last 20% by time
+Refinancing incentives are constructed using **Freddie Mac Primary Mortgage Market Survey (PMMS)**
+mortgage rates sourced from FRED:
 
-Split is done on monthly cohort panel sorted by `period`.
+- **30-year pools:** `MORTGAGE30US`
+- **15-year pools:** `MORTGAGE15US`
+- **20-year pools:** Proxy via maturity interpolation:
+  \[
+  r_{20} = r_{15} + \frac{1}{3}(r_{30} - r_{15})
+  \]
 
-## Usage
+These rates reflect **borrower-facing refinancing conditions** and are used consistently both to
+define prepayment incentives and as the base discount rate in valuation.
 
-Run with defaults:
+---
 
-```bash
-python3 mbs_OLS.py
-```
+### Step 3: Prepayment Modeling (Logit S-Curve)
 
-Example with explicit options:
+Monthly SMM is modeled using a Logistic specification:
 
-```bash
-python3 mbs_OLS.py \
-  --data-path PrepayData.txt \
-  --target-type "30yr TBA Eligible" \
-  --train-ratio 0.8 \
-  --n-paths 300 \
-  --term-months 360 \
-  --seed 1 \
-  --kappa 0.25 \
-  --sigma 0.012 \
-  --min-rows 40 \
-  --min-train-rows 30 \
-  --min-test-rows 8 \
-  --output-dir outputs/ols
-```
+\[
+\ln\left(\frac{SMM}{1-SMM}\right)
+=
+\alpha
++ \beta_1 S
++ \beta_2 S^2
++ \beta_3 S^3
++ \beta_4 \text{Age}
++ \beta_5 \ln(\text{UPB})
++ \varepsilon
+\]
 
-## CLI arguments
+- **Cubic incentive terms** capture the empirical S-curve:
+  - Flat response when out-of-the-money
+  - High sensitivity near at-the-money
+  - Burnout at deep in-the-money levels
+- **Segmentation:** The framework supports separate models by security type (e.g., 15yr, 20yr, 30yr).
 
-- `--data-path` (default: `PrepayData.txt`)
-- `--target-type` (default: `30yr TBA Eligible`)
-- `--train-ratio` (default: `0.8`)
-- `--n-paths` (default: `300`)
-- `--term-months` (default: `360`)
-- `--seed` (default: `1`)
-- `--kappa` (default: `0.25`)
-- `--sigma` (default: `0.012`)
-- `--min-rows` (default: `40`)
-- `--min-train-rows` (default: `30`)
-- `--min-test-rows` (default: `8`)
-- `--output-dir` (default: `outputs/ols`)
+---
 
-## Outputs
+### Step 4: Valuation & Risk Engine
 
-The script writes:
+The valuation framework is explicitly **path-dependent**:
 
-- `outputs/oos_metrics_30yr_tba.csv`
-  - Model A/B/C test metrics (`rmse_smm`, `mae_smm`)
-- `outputs/valuation_compare_30yr_tba.csv`
-  - Baseline vs Improved pricing results
-- `outputs/baseline_vs_improved_delta.csv`
-  - Improved minus Baseline deltas
+- Monthly cash flows are simulated over a 360-month horizon.
+- **Scheduled amortization and prepayments** jointly reduce outstanding balance.
+- Prepayment behavior feeds back into future cash flows through updated loan age and UPB.
+- Interest-rate shocks (±50 bps) are applied to the maturity-matched market rate.
 
-It also prints three tables to terminal:
-- OOS metrics
-- Baseline vs Improved valuation impact
-- Delta table
+---
 
-## Notes
+## 3. Key Findings
 
-- `log_UPB` uses `ln(Cohort_Current_UPB.clip(lower=1))` for numerical stability.
-- Logistic transform is implemented in numerically stable form.
-- Path-loop prediction uses direct coefficient evaluation (faster than per-step patsy `predict`).
+### 3.1 Prepayment S-Curve Behavior
 
-## Troubleshooting
+The estimated Logit models capture economically consistent prepayment dynamics across maturities:
 
-### 1) `Insufficient rows for split/modeling`
-Lower thresholds, for example:
+- **15-year pools** exhibit the steepest S-curve slope, indicating high refinancing sensitivity.
+- **20-year pools** show intermediate behavior.
+- **30-year pools** display a flatter response at high incentive levels, consistent with borrower burnout.
 
-```bash
-python3 mbs_OLS.py --min-rows 30 --min-train-rows 20 --min-test-rows 6
-```
+<img width="1000" height="630" alt="image" src="https://github.com/user-attachments/assets/e5f65e8d-abc4-4172-8951-e606ee6d6666" />
 
-### 2) Environment / package issues
-Install dependencies from `requirements.txt` in a clean virtual environment.
+*(Figure 1: Estimated Prepayment S-Curves by Security Type.)*
 
-### 3) Slow runtime
-Start with fewer paths:
+---
 
-```bash
-python3 mbs_OLS.py --n-paths 30
-```
+### 3.2 Pricing & Negative Convexity
 
-Then increase to production value (e.g. 300+).
+**Scenario Analysis (30yr TBA Eligible, Current Spread ≈ +40bps)**
 
-## Project Extension (Next Phase)
+| Scenario | Rate Shock | Price ($) |
+| :--- | :--- | :--- |
+| Rates −50 bps | −50 bps | **103.64** |
+| Base Case | 0 bps | **101.79** |
+| Rates +50 bps | +50 bps | **99.50** |
 
-To extend this project, the next objective is to build and compare three prepayment-model families under the same pricing engine:
+- **Effective Duration:** **4.06**
 
-1. **OLS Logit model** (current baseline in `mbs_OLS.py`)
-2. **Cox-based hazard model**
-3. **Neural Network (NN) prepayment model**
+The asymmetric price response confirms pronounced **Negative Convexity**:
+price appreciation in a rally is capped by accelerated prepayments, while sell-offs extend duration.
 
-### Extension goal
+<img width="854" height="630" alt="image" src="https://github.com/user-attachments/assets/95833f8c-bfd8-4987-a69b-a200da2d18c3" />
 
-Evaluate which model performs best for **MBS pricing quality**, not only predictive fit.
+*(Figure 2: MBS Price–Yield Profile vs. a Standard Bond.)*
 
-### Planned comparison dimensions
+---
 
-- Out-of-sample prepayment metrics:
-  - `RMSE(SMM)`
-  - `MAE(SMM)`
-- Valuation impact metrics (same cohorts, same scenarios/paths):
-  - `P_base`
-  - `P(+50bp)`
-  - `P(-50bp)`
-  - `effective_duration`
-- Stability / robustness:
-  - sensitivity to small spread/rate shocks
-  - consistency across security types and time windows
+## 4. Repository Structure
 
-### Success criterion
+- **`MBS_pricing.ipynb`**
+  - Data loading and monthly aggregation
+  - Logit model estimation and S-curve visualization
+  - Path-dependent pricing, cash-flow projection, and duration analysis
 
-Select the model that provides the best balance of:
-- predictive accuracy on unseen data, and
-- stable, economically sensible pricing behavior under rate shocks.
+---
+
+## 5. Usage
+
+1. Place raw data locally (not included due to size/proprietary constraints).
+2. Set data path via environment variable if required.
+3. Run all cells in `MBS_pricing.ipynb` to reproduce figures and tables.
+
+---
+
+## 6. Model Limitations & Risk Considerations
+
+- **Static Rate Environment:**  
+  Interest rates are shocked deterministically; stochastic refinancing waves are not modeled.
+- **Reduced-Form Discounting:**  
+  Valuation uses a flat, borrower-facing market rate rather than a full Treasury/swap term structure or calibrated OAS.
+- **Identification Risk:**  
+  Multiple S-curve parameterizations can fit historical data yet imply materially different convexity under stress.
+
+These limitations emphasize that **MBS risk management depends on scenario robustness, not point estimates alone**.
+
+---
+
+## 7. Takeaway
+
+This project demonstrates how borrower prepayment behavior can be systematically translated into
+**price sensitivity, duration shortening, and negative convexity** using a transparent,
+research-grade framework consistent with buy-side MBS analysis.
+
